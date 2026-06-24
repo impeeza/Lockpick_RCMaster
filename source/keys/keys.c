@@ -18,6 +18,8 @@
 
 #include "es_crypto.h"
 #include "fs_crypto.h"
+#include "nca.h"
+#include "nca_extract.h"
 #include "nfc_crypto.h"
 #include "ssl_crypto.h"
 
@@ -566,7 +568,8 @@ int save_mariko_partial_keys(u32 start, u32 count, bool append) {
     return 0;
 }
 
-static void _save_keys_to_sd(key_storage_t *keys, titlekey_buffer_t *titlekey_buffer, bool is_dev) {
+static void _save_keys_to_sd(key_storage_t *keys, titlekey_buffer_t *titlekey_buffer, bool is_dev,
+                              const new_gen_keys_t *new_keys, int new_gen_mkr) {
     if (!sd_mount()) {
         EPRINTF("Unable to mount SD.");
         return;
@@ -646,6 +649,28 @@ static void _save_keys_to_sd(key_storage_t *keys, titlekey_buffer_t *titlekey_bu
     char root_key_name[21] = "tsec_root_key_00";
     s_printf(root_key_name + 14, "%02x", TSEC_ROOT_KEY_VERSION);
     _save_key(root_key_name, keys->tsec_root_key, SE_KEY_128_SIZE, text_buffer);
+
+    if (!is_dev && new_keys && key_exists(new_keys->master_key)) {
+        char kn[40];
+        u32 g = (u32)new_gen_mkr;
+        s_printf(kn, "master_kek_%02x", g);
+        _save_key(kn, new_keys->master_kek,               SE_KEY_128_SIZE, text_buffer);
+        s_printf(kn, "master_key_%02x", g);
+        _save_key(kn, new_keys->master_key,               SE_KEY_128_SIZE, text_buffer);
+        s_printf(kn, "package2_key_%02x", g);
+        _save_key(kn, new_keys->package2_key,             SE_KEY_128_SIZE, text_buffer);
+        s_printf(kn, "titlekek_%02x", g);
+        _save_key(kn, new_keys->titlekek,                 SE_KEY_128_SIZE, text_buffer);
+        s_printf(kn, "key_area_key_application_%02x", g);
+        _save_key(kn, new_keys->key_area_key_application, SE_KEY_128_SIZE, text_buffer);
+        s_printf(kn, "key_area_key_ocean_%02x", g);
+        _save_key(kn, new_keys->key_area_key_ocean,       SE_KEY_128_SIZE, text_buffer);
+        s_printf(kn, "key_area_key_system_%02x", g);
+        _save_key(kn, new_keys->key_area_key_system,      SE_KEY_128_SIZE, text_buffer);
+        _save_key("hovi_kek",          hovi_kek,                   SE_KEY_128_SIZE, text_buffer);
+        _save_key("tsec_root_key_00",  new_keys->tsec_root_key_00, SE_KEY_128_SIZE, text_buffer);
+        _save_key("tsec_root_key_01",  new_keys->tsec_root_key_01, SE_KEY_128_SIZE, text_buffer);
+    }
 
     gfx_printf("\n%k  Found %d %s keys.\n\n", colors[(color_idx++) % 6], _key_count, is_dev ? "dev" : "prod");
     gfx_printf("%kFound through master_key_%02x.\n\n", colors[(color_idx++) % 6], KB_FIRMWARE_VERSION_MAX);
@@ -728,6 +753,17 @@ static void _derive_keys() {
     _derive_non_unique_keys(&prod_keys, is_dev);
     _derive_non_unique_keys(&dev_keys, is_dev);
 
+    new_gen_keys_t new_keys = {0};
+    int new_gen_mkr = 0;
+    int key_gen_result = extract_new_gen_keys(keys, &new_keys, &new_gen_mkr);
+    if (key_gen_result > 0) {
+        gfx_printf("%kNew keys derived for master_key_%02x\n", colors[(color_idx++) % 6], new_gen_mkr);
+        if (new_gen_mkr > CURRENT_KEY_GENERATION + 1)
+            EPRINTFARGS("Warning: master_kek_source missing for revisions %02x-%02x.", CURRENT_KEY_GENERATION + 1, new_gen_mkr - 1);
+    } else if (key_gen_result == 0) {
+        gfx_printf("%kKey generation up to date.\n", colors[(color_idx++) % 6]);
+    }
+
     titlekey_buffer_t *titlekey_buffer = (titlekey_buffer_t *)TITLEKEY_BUF_ADR;
 
     // Requires BIS key for SYSTEM partition
@@ -743,13 +779,13 @@ static void _derive_keys() {
     gfx_printf("%kLockpick totally done in %d us\n", colors[(color_idx++) % 6], end_time - start_whole_operation_time);
 
     if (h_cfg.t210b01) {
-        // On Mariko, save only relevant key set
-        _save_keys_to_sd(keys, titlekey_buffer, is_dev);
+        // On Mariko, save only relevant key set (no new-gen keys)
+        _save_keys_to_sd(keys, titlekey_buffer, is_dev, NULL, 0);
     } else {
-        // On Erista, save both prod and dev key sets
-        _save_keys_to_sd(&prod_keys, titlekey_buffer, false);
+        // On Erista, save both prod and dev key sets; new-gen keys go to prod only
+        _save_keys_to_sd(&prod_keys, titlekey_buffer, false, &new_keys, new_gen_mkr);
         _key_count = 0;
-        _save_keys_to_sd(&dev_keys, NULL, true);
+        _save_keys_to_sd(&dev_keys, NULL, true, NULL, 0);
     }
 }
 
